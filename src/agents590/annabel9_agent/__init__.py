@@ -2,12 +2,31 @@
 
 import asyncio
 import json
+import sys
+from collections.abc import Mapping
 from typing import cast
 
 from openai.types.responses import ResponseInputItemParam, ResponseInputParam, ToolParam
 
 from agents590.contracts import RunContext
 from agents590.provider import UNCOpenAISettings
+
+
+def trace(event: str, data: Mapping[str, object]) -> None:
+    # event: a string decscribing the event type, e.g., "model_request", "model_response", "function_call", "function_call_output"
+    # data: contains details about the events
+    print(
+        "AGENT_TRACE:"
+        + json.dumps(
+            {
+                "event": event,
+                "data": data,
+            },
+            default=str,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 class AnnabelAgent:
@@ -70,15 +89,27 @@ class AnnabelAgent:
                 "content": instruction,
             },
         ]
+        max_iterations = 15
 
         async with settings.create_async_client() as client:
-            for _ in range(15):
+            for _ in range(max_iterations):
+                trace("model_request", {"messages": messages, "tools": tools})
                 response = await client.responses.create(
                     model=settings.model,
                     input=messages,
                     tools=tools,
                     store=False,
                     background=False,
+                )
+
+                trace(
+                    "model_response",
+                    {
+                        "model": settings.model,
+                        "output": [item.model_dump(exclude_none=True) for item in response.output],
+                        "input_tokens": (response.usage.input_tokens if response.usage else None),
+                        "output_tokens": (response.usage.output_tokens if response.usage else None),
+                    },
                 )
 
                 for item in response.output:
@@ -95,7 +126,7 @@ class AnnabelAgent:
                 for call in tool_calls:
                     arguments = json.loads(call.arguments)
                     command = str(arguments["command"])
-                    print(f"[DEBUG] Command: {command}", flush=True)
+                    trace("function_call", {"call_id": call.call_id, "command": command})
 
                     process = await asyncio.create_subprocess_shell(
                         command,
@@ -121,7 +152,7 @@ class AnnabelAgent:
                         await process.communicate()
                         result = "Command timed out after 30 seconds."
 
-                    print(f"[DEBUG] Result:\n{result}", flush=True)
+                    trace("function_call_output", {"call_id": call.call_id, "output": result})
                     messages.append(
                         {
                             "type": "function_call_output",

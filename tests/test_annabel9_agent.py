@@ -29,7 +29,7 @@ def test_agent_returns_response() -> None:
     agent = AnnabelAgent()
     context = RunContext(Path.cwd())
 
-    response = MagicMock()
+    response = MagicMock(usage=None)
     response.output = []
     response.output_text = "Task completed successfully."
 
@@ -68,10 +68,10 @@ def test_shell_command(tmp_path: Path) -> None:
         "call_id": "call_1",
     }
 
-    first_response = MagicMock()
+    first_response = MagicMock(usage=None)
     first_response.output = [call]
 
-    second_response = MagicMock()
+    second_response = MagicMock(usage=None)
     second_response.output = []
     second_response.output_text = "Done"
 
@@ -115,10 +115,10 @@ def test_shell_timeout(tmp_path: Path) -> None:
         "call_id": "call_1",
     }
 
-    first_response = MagicMock()
+    first_response = MagicMock(usage=None)
     first_response.output = [call]
 
-    second_response = MagicMock()
+    second_response = MagicMock(usage=None)
     second_response.output = []
     second_response.output_text = "Done"
 
