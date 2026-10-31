@@ -2,35 +2,17 @@
 
 import asyncio
 import json
-import sys
-from collections.abc import Mapping
 from typing import cast
 
 from openai.types.responses import ResponseInputItemParam, ResponseInputParam, ToolParam
 
+from agents590.atif import ATIFRecorder, JSONValue
 from agents590.contracts import RunContext
 from agents590.provider import UNCOpenAISettings
 
 
-def trace(event: str, data: Mapping[str, object]) -> None:
-    # event: a string decscribing the event type, e.g., "model_request", "model_response", "function_call", "function_call_output"
-    # data: contains details about the events
-    print(
-        "AGENT_TRACE:"
-        + json.dumps(
-            {
-                "event": event,
-                "data": data,
-            },
-            default=str,
-        ),
-        file=sys.stderr,
-        flush=True,
-    )
-
-
 class AnnabelAgent:
-    """Scaffold for a model/tool loop using the shared standalone interface."""
+    """Coding agent that records its execution using ATIF."""
 
     def provider_settings(self, context: RunContext) -> UNCOpenAISettings:
         """Prefer the per-run model to the environment's configured deployment."""
@@ -38,12 +20,14 @@ class AnnabelAgent:
 
     async def run(self, instruction: str, context: RunContext) -> str:
         """Run the agent with the given instruction and context."""
-        # Start with settings = self.provider_settings(context), then open
-        # settings.create_async_client() and use model=settings.model.
-        # Send Responses requests with store=False and background=False.
-        # Run shell tools with context.cwd as their explicit working directory.
 
         settings = self.provider_settings(context)
+
+        # Create the shared ATIF recorder.
+        recorder = ATIFRecorder.from_environment(
+            agent="annabel9_agent",
+            model=settings.model,
+        )
 
         tools: list[ToolParam] = [
             {
@@ -77,10 +61,10 @@ class AnnabelAgent:
                     "Use shell commands to read and edit files. "
                     "After editing files, inspect the resulting contents and verify that "
                     "all requested requirements are met. "
-                    "Check for unintended changes before reporting completion."
-                    "Run tests after making changes."
-                    "If the tests fail inspect the failures, fix the problems, and rerun them."
-                    "Do not claim success until the tests pass."
+                    "Check for unintended changes before reporting completion. "
+                    "Run tests after making changes. "
+                    "If the tests fail, inspect the failures, fix the problems, and rerun them. "
+                    "Do not claim success until the tests pass. "
                     "Summarize your changes when finished."
                 ),
             },
@@ -89,11 +73,26 @@ class AnnabelAgent:
                 "content": instruction,
             },
         ]
+
         max_iterations = 15
+
+        # Keep track of total token usage.
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cached_tokens = 0
+
+        def save_final_metrics() -> None:
+            """Save cumulative token usage to the ATIF trajectory."""
+            recorder.document["final_metrics"] = {
+                "total_prompt_tokens": total_input_tokens,
+                "total_completion_tokens": total_output_tokens,
+                "total_cached_tokens": total_cached_tokens,
+                "total_steps": len(recorder.document["steps"]),
+            }
+            recorder.write()
 
         async with settings.create_async_client() as client:
             for _ in range(max_iterations):
-                trace("model_request", {"messages": messages, "tools": tools})
                 response = await client.responses.create(
                     model=settings.model,
                     input=messages,
@@ -102,31 +101,88 @@ class AnnabelAgent:
                     background=False,
                 )
 
-                trace(
-                    "model_response",
-                    {
-                        "model": settings.model,
-                        "output": [item.model_dump(exclude_none=True) for item in response.output],
-                        "input_tokens": (response.usage.input_tokens if response.usage else None),
-                        "output_tokens": (response.usage.output_tokens if response.usage else None),
-                    },
-                )
+                # Record token usage for this model response.
+                usage = response.usage
+                metrics: dict[str, JSONValue] | None = None
 
-                for item in response.output:
-                    # SDK serialization loses the specific Responses item type.
-                    messages.append(
-                        cast(ResponseInputItemParam, item.model_dump(exclude_none=True))
+                if usage is not None:
+                    cached_tokens = (
+                        usage.input_tokens_details.cached_tokens
+                        if usage.input_tokens_details
+                        else 0
                     )
 
+                    metrics = {
+                        "prompt_tokens": usage.input_tokens,
+                        "completion_tokens": usage.output_tokens,
+                        "cached_tokens": cached_tokens,
+                    }
+
+                    total_input_tokens += usage.input_tokens
+                    total_output_tokens += usage.output_tokens
+                    total_cached_tokens += cached_tokens
+
+                # Find the shell commands requested by the model.
                 tool_calls = [item for item in response.output if item.type == "function_call"]
+
+                # Record the model response and its tool calls.
+                atif_tool_calls: list[JSONValue] = []
+
+                for call in tool_calls:
+                    try:
+                        recorded_arguments: JSONValue = json.loads(call.arguments)
+                    except json.JSONDecodeError:
+                        recorded_arguments = {"raw_arguments": call.arguments}
+
+                    atif_tool_calls.append(
+                        {
+                            "tool_call_id": call.call_id,
+                            "function_name": call.name,
+                            "arguments": recorded_arguments,
+                        }
+                    )
+
+                # Collect text from the model's response.
+                text_parts = [
+                    part.text
+                    for item in response.output
+                    if item.type == "message"
+                    for part in item.content
+                    if part.type == "output_text"
+                ]
+
+                fields: dict[str, JSONValue] = {"model_name": settings.model}
+
+                if metrics is not None:
+                    fields["metrics"] = metrics
+
+                if atif_tool_calls:
+                    fields["tool_calls"] = atif_tool_calls
+
+                recorder.add(
+                    "agent",
+                    "\n".join(text_parts),
+                    **fields,
+                )
+
+                save_final_metrics()
+
+                # Add model output to the conversation.
+                for item in response.output:
+                    messages.append(
+                        cast(
+                            ResponseInputItemParam,
+                            item.model_dump(exclude_none=True),
+                        )
+                    )
 
                 if not tool_calls:
                     return response.output_text or "Task completed."
 
+                # Execute each shell command requested by the model.
                 for call in tool_calls:
                     arguments = json.loads(call.arguments)
                     command = str(arguments["command"])
-                    trace("function_call", {"call_id": call.call_id, "command": command})
 
                     process = await asyncio.create_subprocess_shell(
                         command,
@@ -140,6 +196,7 @@ class AnnabelAgent:
                             process.communicate(),
                             timeout=30,
                         )
+
                         result = (
                             f"Exit code: {process.returncode}\n"
                             f"STDOUT:\n"
@@ -147,12 +204,29 @@ class AnnabelAgent:
                             f"STDERR:\n"
                             f"{stderr.decode(errors='replace')[:4000]}"
                         )
+
                     except TimeoutError:
                         process.kill()
                         await process.communicate()
                         result = "Command timed out after 30 seconds."
 
-                    trace("function_call_output", {"call_id": call.call_id, "output": result})
+                    # Record the shell command's output.
+                    recorder.add(
+                        "environment",
+                        result,
+                        observation={
+                            "results": [
+                                {
+                                    "source_call_id": call.call_id,
+                                    "content": result,
+                                }
+                            ]
+                        },
+                    )
+
+                    save_final_metrics()
+
+                    # Return the tool result to the model.
                     messages.append(
                         {
                             "type": "function_call_output",
@@ -161,4 +235,5 @@ class AnnabelAgent:
                         }
                     )
 
+        save_final_metrics()
         return "Agent reached the maximum step limit."
