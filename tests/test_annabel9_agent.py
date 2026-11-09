@@ -55,11 +55,14 @@ def test_shell_command(tmp_path: Path) -> None:
     """Test that the agent executes a shell command."""
     agent = AnnabelAgent()
     context = RunContext(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("Run make check and make test before finishing.")
 
     call = MagicMock()
     call.type = "function_call"
     call.name = "run_command"
-    call.arguments = json.dumps({"command": "pwd"})
+    call.arguments = json.dumps(
+        {"command": "printf 'bootstrapped\\n' > result.txt && test -s result.txt && pwd"}
+    )
     call.call_id = "call_1"
     call.model_dump.return_value = {
         "type": "function_call",
@@ -90,12 +93,15 @@ def test_shell_command(tmp_path: Path) -> None:
         result = asyncio.run(agent.run("Show current directory", context))
 
     assert result == "Done"
+    assert (tmp_path / "result.txt").read_text() == "bootstrapped\n"
 
     # Verify the tool result was sent back to the model.
     second_request = client.responses.create.await_args_list[1]
     messages = second_request.kwargs["input"]
 
+    assert "Run make check and make test" in messages[0]["content"]
     assert str(tmp_path.resolve()) in messages[-1]["output"]
+    assert "Exit code: 0" in messages[-1]["output"]
 
 
 def test_shell_timeout(tmp_path: Path) -> None:
@@ -151,4 +157,4 @@ def test_shell_timeout(tmp_path: Path) -> None:
     assert process.communicate.await_count == 2
     second_request = client.responses.create.await_args_list[1]
     messages = second_request.kwargs["input"]
-    assert messages[-1]["output"] == "Command timed out after 30 seconds."
+    assert messages[-1]["output"] == "Command timed out after 120 seconds."

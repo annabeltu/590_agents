@@ -78,6 +78,38 @@ UNC routing was checked against LearnWithAI revision
 
 ## Development
 
+### Work on the agent with the agent
+
+Install Docker and the VS Code Dev Containers extension, open this repository in
+VS Code, and select **Dev Containers: Reopen in Container**. The container includes
+Python 3.12, uv, Git, make, and ripgrep; creation installs the locked development
+dependencies. A named volume keeps the Linux `.venv` separate from the host's
+virtual environment. Source edits persist in your checkout. The container has no
+Docker socket mount; shell commands still have access to the mounted checkout
+and any credentials you provide.
+
+Inside the container, first run `make check` and `make test`. Copy `.env.example`
+to `.env` and configure your UNC credentials if you have not already done so.
+Then give Annabel's agent a small, reviewable task on its own implementation:
+
+```sh
+uv run agents590 annabel9_agent --env-file .env --cwd . -i "Inspect src/agents590/annabel9_agent and its tests. Add a regression test for a shell command that exits nonzero, verifying the exit status is returned to the model. Follow AGENTS.md, run make check and make test, and summarize the diff."
+git diff -- src/agents590/annabel9_agent tests/test_annabel9_agent.py
+```
+
+This command makes billable model requests and lets the agent execute shell
+commands. Start from a clean Git branch so you can review and revert its edits.
+The agent loads the working directory's `AGENTS.md`, can use up to 50 model
+turns, and allows two minutes per shell command for development checks. If it
+hits the step limit, review the partial changes before continuing. Changes to
+the agent take effect on the next invocation.
+
+The automated shell-loop test uses mocked model responses with real commands
+in a temporary directory to verify editing a file, checking the result, loading
+repository instructions, and sending command output back to the model. It does
+not establish that a live model can independently complete a coding task; use
+the task above for that manual check.
+
 ```sh
 make check  # Ruff lint/format and Pyright static type checking
 make test   # pytest, with no live model requests
